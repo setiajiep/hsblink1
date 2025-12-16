@@ -45,6 +45,7 @@
     <style>
         body { background-color: #f8fafc; }
         .glass-card { background: white; border: 1px solid #e2e8f0; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05); }
+        .glass-card-dark { background: #0f172a; border: 1px solid #1e293b; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1); }
         .animate-enter { animation: enter 0.6s ease-out forwards; opacity: 0; transform: translateY(10px); }
         @keyframes enter { to { opacity: 1; transform: translateY(0); } }
         /* Loader */
@@ -63,6 +64,7 @@
         const { useState, useEffect, useRef, useMemo } = React;
 
         // --- KONFIGURASI API ---
+        // PENTING: Ganti URL ini dengan URL Web App dari Deploy Script Google Apps Script yang baru
         const API_URL = "https://script.google.com/macros/s/AKfycbxXoPXd2Jfgh0iap9JliNnYaLLxYs3agFItsxaZ6T5vqPZEu0UyfqzPxTd0WUeyeNkB8Q/exec";
 
         // --- UTILS ---
@@ -73,6 +75,7 @@
             if (!val) return 0;
             let str = val.toString().trim();
             const isNegativeWrapper = str.startsWith('(') && str.endsWith(')');
+            // Handle format Indonesia (1.000,00) -> Hapus titik, ganti koma jadi titik
             let cleanStr = str.replace(/[^\d.,\-()]/g, '').replace(/\./g, '').replace(/,/g, '.').replace(/[()]/g, '');
             let num = parseFloat(cleanStr);
             return isNaN(num) ? 0 : (isNegativeWrapper ? -Math.abs(num) : num);
@@ -80,7 +83,7 @@
 
         // --- COMPONENTS ---
 
-        const ChartComponent = ({ type, data, options, height = 250 }) => {
+        const ChartComponent = ({ type, data, options = {}, height = 300 }) => {
             const chartRef = useRef(null);
             const canvasRef = useRef(null);
 
@@ -88,24 +91,31 @@
                 if (canvasRef.current) {
                     if (chartRef.current) chartRef.current.destroy();
                     const ctx = canvasRef.current.getContext('2d');
+                    
+                    const chartOptions = {
+                        ...options,
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: { position: 'bottom', labels: { usePointStyle: true, boxWidth: 8, padding: 20, font: { family: "'Plus Jakarta Sans', sans-serif" } } },
+                            tooltip: { 
+                                backgroundColor: 'rgba(15, 23, 42, 0.95)', 
+                                padding: 12, 
+                                cornerRadius: 8,
+                                titleFont: { family: "'Plus Jakarta Sans', sans-serif", size: 13 },
+                                bodyFont: { family: "'Plus Jakarta Sans', sans-serif", size: 12 },
+                                displayColors: true,
+                                boxPadding: 4
+                            },
+                            ...(options.plugins || {})
+                        },
+                        scales: options.scales || {}
+                    };
+
                     chartRef.current = new Chart(ctx, {
                         type: type,
                         data: data,
-                        options: {
-                            ...options,
-                            responsive: true,
-                            maintainAspectRatio: false,
-                            plugins: {
-                                legend: { position: 'bottom', labels: { usePointStyle: true, boxWidth: 8, padding: 20, font: { family: "'Plus Jakarta Sans', sans-serif" } } },
-                                tooltip: { 
-                                    backgroundColor: 'rgba(15, 23, 42, 0.9)', 
-                                    padding: 12, 
-                                    cornerRadius: 8,
-                                    titleFont: { family: "'Plus Jakarta Sans', sans-serif" },
-                                    bodyFont: { family: "'Plus Jakarta Sans', sans-serif" }
-                                }
-                            }
-                        }
+                        options: chartOptions
                     });
                 }
                 return () => { if (chartRef.current) chartRef.current.destroy(); };
@@ -155,10 +165,14 @@
                     setLoading(true);
                     const res = await fetch(API_URL);
                     const json = await res.json();
-                    if (json.status === 'success') processData(json.data);
+                    if (json.status === 'success') {
+                        processData(json.data);
+                    } else {
+                        console.error("API Error:", json);
+                    }
                 } catch (err) {
                     console.error("Error fetching data", err);
-                    // Mock Data on Error
+                    // Mock Data on Error untuk mencegah blank screen
                     processData({ laba_rugi: [], neraca: { aset: [], pasiva: [] } });
                 } finally {
                     setLoading(false);
@@ -168,27 +182,58 @@
             const processData = (apiData) => {
                 const { laba_rugi, neraca } = apiData;
 
-                // --- 1. CALCULATE REALTIME NET PROFIT (LABA RUGI) ---
+                // --- 1. PROSES DATA BULANAN DARI SCRIPT BARU ---
+                // Mapping keys dari object 'bulanan' di script GAS
+                const monthKeys = ['januari', 'februari', 'maret', 'april', 'mei', 'juni', 'juli', 'agustus', 'september', 'oktober', 'november', 'desember'];
+                const monthLabels = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Ags', 'Sep', 'Okt', 'Nov', 'Des'];
+
+                // Inisialisasi array akumulator
+                let monthlyAgg = monthKeys.map((key, index) => ({
+                    month: monthLabels[index],
+                    key: key,
+                    revenue: 0,
+                    expense: 0,
+                    profit: 0
+                }));
+
                 const plItems = laba_rugi || [];
                 const revenueItems = plItems.filter(i => i.kode_akun?.toString().startsWith('4'));
                 const expenseItems = plItems.filter(i => ['5','6','9'].some(p => i.kode_akun?.toString().startsWith(p)));
                 
-                const totalRevenue = revenueItems.reduce((sum, i) => sum + cleanNumber(i.total_tahunan), 0);
-                const totalExpense = expenseItems.reduce((sum, i) => sum + cleanNumber(i.total_tahunan), 0);
+                // Loop semua baris untuk mengisi data bulanan
+                plItems.forEach(item => {
+                    const isRev = item.kode_akun?.toString().startsWith('4');
+                    const isExp = ['5','6','9'].some(p => item.kode_akun?.toString().startsWith(p));
+                    
+                    if ((isRev || isExp) && item.bulanan) {
+                        monthKeys.forEach((key, idx) => {
+                            // Ambil data bulanan, bersihkan format angka
+                            const val = cleanNumber(item.bulanan[key]);
+                            if (isRev) monthlyAgg[idx].revenue += val;
+                            if (isExp) monthlyAgg[idx].expense += val;
+                        });
+                    }
+                });
+
+                // Hitung profit per bulan
+                monthlyAgg.forEach(m => {
+                    m.profit = m.revenue - m.expense;
+                });
+
+                // --- 2. HITUNG TOTAL TAHUNAN ---
+                const totalRevenue = monthlyAgg.reduce((sum, m) => sum + m.revenue, 0);
+                const totalExpense = monthlyAgg.reduce((sum, m) => sum + m.expense, 0);
                 const calculatedNetProfit = totalRevenue - totalExpense;
 
-                // --- 2. PROCESS ASSETS (NERACA KIRI) ---
+                // --- 3. PROSES NERACA ---
                 const rawAssets = neraca.aset || [];
-                // Filter: Hanya yang punya kode angka & bukan baris total
                 const validAssets = rawAssets.filter(i => i.kode && /^\d+$/.test(i.kode) && !i.nama.toLowerCase().includes('total'));
                 const totalAsset = validAssets.reduce((sum, item) => sum + cleanNumber(item.saldo), 0);
 
-                // --- 3. PROCESS PASIVA (NERACA KANAN) & AUTO-BALANCE ---
                 const rawPasiva = neraca.pasiva || [];
                 let validPasiva = rawPasiva.filter(i => i.kode && /^\d+$/.test(i.kode) && !i.nama.toLowerCase().includes('total'));
 
-                // *** MAGIC: AUTO-SYNC LABA TAHUN BERJALAN ***
-                // Cari apakah sudah ada akun "Laba Tahun Berjalan" atau sejenisnya
+                // Auto-Sync Laba Tahun Berjalan
                 const labaIndex = validPasiva.findIndex(p => 
                     p.nama.toLowerCase().includes('laba tahun berjalan') || 
                     p.nama.toLowerCase().includes('current year') ||
@@ -196,14 +241,12 @@
                 );
 
                 if (labaIndex !== -1) {
-                    // Jika ada, TIMPA nilainya dengan hasil kalkulasi real PL
                     validPasiva[labaIndex] = {
                         ...validPasiva[labaIndex],
-                        saldo: calculatedNetProfit, // Force update value
+                        saldo: calculatedNetProfit, // Pakai hasil hitungan real
                         isAutoCalculated: true
                     };
                 } else {
-                    // Jika tidak ada, TAMBAHKAN manual ke Ekuitas
                     validPasiva.push({
                         kode: '39999',
                         nama: 'Laba Tahun Berjalan (System)',
@@ -212,17 +255,19 @@
                     });
                 }
 
-                // Hitung ulang Total Pasiva setelah injeksi
                 const totalPasiva = validPasiva.reduce((sum, item) => sum + cleanNumber(item.saldo), 0);
 
                 // Check Balance
                 const diff = Math.abs(totalAsset - totalPasiva);
-                const isBalanced = diff < 1000; // Toleransi Rp 1000
+                const isBalanced = diff < 1000;
                 setBalanceStatus(isBalanced ? 'balanced' : 'unbalanced');
 
-                // Top Expenses for Chart
+                // Top Expenses (Pakai total tahunan dari object bulanan atau total_tahunan di row)
                 const topExpenses = expenseItems
-                    .map(i => ({ label: i.nama_akun, val: cleanNumber(i.total_tahunan) }))
+                    .map(i => ({ 
+                        label: i.nama_akun, 
+                        val: cleanNumber(i.total_tahunan) // Script GAS mengirim total_tahunan juga
+                    }))
                     .filter(i => i.val > 0)
                     .sort((a,b) => b.val - a.val)
                     .slice(0, 5);
@@ -237,6 +282,7 @@
                     liabilities: validPasiva,
                     topExpenses,
                     plRows: [...revenueItems, ...expenseItems],
+                    monthlyStats: monthlyAgg, // Data bulanan REAL
                     lastUpdated: new Date(apiData.generated_at || new Date())
                 });
             };
@@ -251,17 +297,14 @@
             // --- VIEW: DASHBOARD OVERVIEW ---
             const Overview = () => (
                 <div className="space-y-6 animate-enter">
-                    {/* Stats Grid */}
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                        <StatCard title="Total Aset" value={formatRupiah(data.totalAsset)} subValue="Posisi Kas & Bank" trend="up" icon="wallet" colorClass="bg-blue-500 text-blue-600" delay="100"/>
+                        <StatCard title="Total Aset" value={formatRupiah(data.totalAsset)} subValue="Posisi Neraca" trend="up" icon="wallet" colorClass="bg-blue-500 text-blue-600" delay="100"/>
                         <StatCard title="Pendapatan (YTD)" value={formatRupiah(data.totalRevenue)} subValue="Total Revenue" trend="up" icon="trending-up" colorClass="bg-emerald-500 text-emerald-600" delay="200"/>
                         <StatCard title="Beban Operasional" value={formatRupiah(data.totalExpense)} subValue="Total OpEx + HPP" trend="down" icon="trending-down" colorClass="bg-rose-500 text-rose-600" delay="300"/>
                         <StatCard title="Laba Bersih" value={formatRupiah(data.netProfit)} subValue="Net Profit" trend={data.netProfit >= 0 ? 'up' : 'down'} icon="pie-chart" colorClass={data.netProfit >= 0 ? "bg-indigo-500 text-indigo-600" : "bg-rose-500 text-rose-600"} delay="400"/>
                     </div>
 
-                    {/* Charts Row */}
                     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                        {/* Chart 1: Komposisi Aset */}
                         <div className="glass-card p-6 rounded-xl lg:col-span-2">
                             <h3 className="font-bold text-slate-800 mb-6 flex items-center gap-2 text-sm uppercase tracking-wide">
                                 <i data-lucide="bar-chart-2" className="w-4 h-4 text-blue-500"></i> Komposisi Aset Utama
@@ -281,7 +324,6 @@
                             />
                         </div>
 
-                        {/* Chart 2: Top Expenses */}
                         <div className="glass-card p-6 rounded-xl">
                             <h3 className="font-bold text-slate-800 mb-6 flex items-center gap-2 text-sm uppercase tracking-wide">
                                 <i data-lucide="pie-chart" className="w-4 h-4 text-rose-500"></i> Top 5 Beban
@@ -303,6 +345,146 @@
                                 <p className="text-xs text-slate-400 font-medium uppercase">Total Beban</p>
                                 <p className="font-bold text-slate-800 text-lg">{formatRupiah(data.totalExpense)}</p>
                             </div>
+                        </div>
+                    </div>
+                </div>
+            );
+
+            // --- VIEW: MONTHLY REPORT ---
+            const MonthlyReport = () => (
+                <div className="space-y-8 animate-enter">
+                    {/* Header Summary */}
+                    <div className="glass-card-dark p-6 rounded-xl text-white flex flex-col md:flex-row justify-between items-center gap-6">
+                        <div className="text-center md:text-left">
+                            <h3 className="text-slate-400 text-sm font-medium mb-1">Rata-rata Pendapatan Bulanan</h3>
+                            <p className="text-2xl font-bold">{formatRupiah(data.totalRevenue / 12)} / bulan</p>
+                        </div>
+                        <div className="flex gap-4">
+                             <div className="text-center bg-slate-800/50 p-3 rounded-lg border border-slate-700">
+                                <p className="text-xs text-emerald-400 font-bold uppercase mb-1">Highest Income</p>
+                                <p className="font-mono text-sm">{formatRupiah(Math.max(...data.monthlyStats.map(m => m.revenue)))}</p>
+                            </div>
+                            <div className="text-center bg-slate-800/50 p-3 rounded-lg border border-slate-700">
+                                <p className="text-xs text-rose-400 font-bold uppercase mb-1">Highest Expense</p>
+                                <p className="font-mono text-sm">{formatRupiah(Math.max(...data.monthlyStats.map(m => m.expense)))}</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Chart: Income vs Expense */}
+                    <div className="glass-card p-6 rounded-xl">
+                        <div className="flex justify-between items-center mb-6">
+                            <h3 className="font-bold text-slate-800 flex items-center gap-2 text-sm uppercase tracking-wide">
+                                <i data-lucide="bar-chart" className="w-4 h-4 text-indigo-500"></i> Realisasi Arus Kas Bulanan
+                            </h3>
+                            <div className="flex gap-2 text-xs font-medium">
+                                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-500"></span> Pendapatan</span>
+                                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-rose-500"></span> Beban</span>
+                            </div>
+                        </div>
+                        <ChartComponent 
+                            type="bar"
+                            height={320}
+                            data={{
+                                labels: data.monthlyStats.map(m => m.month),
+                                datasets: [
+                                    {
+                                        label: 'Pendapatan',
+                                        data: data.monthlyStats.map(m => m.revenue),
+                                        backgroundColor: '#10b981',
+                                        borderRadius: 4,
+                                        barPercentage: 0.6,
+                                        categoryPercentage: 0.8
+                                    },
+                                    {
+                                        label: 'Beban',
+                                        data: data.monthlyStats.map(m => m.expense),
+                                        backgroundColor: '#ef4444',
+                                        borderRadius: 4,
+                                        barPercentage: 0.6,
+                                        categoryPercentage: 0.8
+                                    }
+                                ]
+                            }}
+                            options={{
+                                scales: {
+                                    y: { beginAtZero: true, grid: { color: '#f1f5f9' }, ticks: { callback: (val) => val / 1000000 + 'jt' } },
+                                    x: { grid: { display: false } }
+                                }
+                            }}
+                        />
+                    </div>
+
+                    {/* Chart: Profit Trend */}
+                    <div className="glass-card p-6 rounded-xl">
+                        <h3 className="font-bold text-slate-800 mb-6 flex items-center gap-2 text-sm uppercase tracking-wide">
+                            <i data-lucide="activity" className="w-4 h-4 text-blue-500"></i> Tren Keuntungan Bersih (Net Profit)
+                        </h3>
+                        <ChartComponent 
+                            type="line"
+                            height={280}
+                            data={{
+                                labels: data.monthlyStats.map(m => m.month),
+                                datasets: [
+                                    {
+                                        label: 'Keuntungan',
+                                        data: data.monthlyStats.map(m => m.profit),
+                                        borderColor: '#3b82f6',
+                                        backgroundColor: (context) => {
+                                            const ctx = context.chart.ctx;
+                                            const gradient = ctx.createLinearGradient(0, 0, 0, 300);
+                                            gradient.addColorStop(0, 'rgba(59, 130, 246, 0.2)');
+                                            gradient.addColorStop(1, 'rgba(59, 130, 246, 0)');
+                                            return gradient;
+                                        },
+                                        fill: true,
+                                        tension: 0.4,
+                                        pointRadius: 4,
+                                        pointHoverRadius: 6
+                                    }
+                                ]
+                            }}
+                            options={{
+                                scales: {
+                                    y: { grid: { color: '#f1f5f9' } },
+                                    x: { grid: { display: false } }
+                                }
+                            }}
+                        />
+                    </div>
+
+                    {/* Simple Table */}
+                    <div className="glass-card rounded-xl overflow-hidden">
+                         <div className="p-4 bg-slate-50 border-b border-slate-200 font-bold text-sm text-slate-700 uppercase tracking-wide">
+                            Rincian Angka Bulanan (Realtime)
+                        </div>
+                        <div className="overflow-x-auto">
+                            <table className="w-full text-sm text-left">
+                                <thead className="bg-white text-slate-500 font-semibold border-b border-slate-100 text-xs uppercase">
+                                    <tr>
+                                        <th className="px-6 py-3">Bulan</th>
+                                        <th className="px-6 py-3 text-right text-emerald-600">Pemasukan</th>
+                                        <th className="px-6 py-3 text-right text-rose-600">Pengeluaran</th>
+                                        <th className="px-6 py-3 text-right text-blue-600">Profit</th>
+                                        <th className="px-6 py-3 text-center">Margin</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                    {data.monthlyStats.map((row, i) => (
+                                        <tr key={i} className="hover:bg-slate-50">
+                                            <td className="px-6 py-3 font-medium text-slate-700">{row.month}</td>
+                                            <td className="px-6 py-3 text-right font-mono">{formatRupiah(row.revenue)}</td>
+                                            <td className="px-6 py-3 text-right font-mono">{formatRupiah(row.expense)}</td>
+                                            <td className={`px-6 py-3 text-right font-mono font-bold ${row.profit >= 0 ? 'text-slate-700' : 'text-rose-600'}`}>
+                                                {formatRupiah(row.profit)}
+                                            </td>
+                                            <td className="px-6 py-3 text-center text-xs text-slate-500">
+                                                {row.revenue > 0 ? ((row.profit / row.revenue) * 100).toFixed(1) + '%' : '-'}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
                         </div>
                     </div>
                 </div>
@@ -389,6 +571,7 @@
                         <nav className="p-4 space-y-2 mt-4">
                             {[
                                 { id: 'overview', label: 'Dashboard', icon: 'layout-dashboard' },
+                                { id: 'monthly', label: 'Laporan Bulanan', icon: 'bar-chart' },
                                 { id: 'pl', label: 'Laba Rugi', icon: 'trending-up' },
                                 { id: 'neraca', label: 'Neraca', icon: 'file-text' }
                             ].map(menu => (
@@ -430,6 +613,7 @@
                                 <div>
                                     <h2 className="text-2xl font-bold text-slate-800 tracking-tight">
                                         {activeTab === 'overview' ? 'Executive Overview' : 
+                                         activeTab === 'monthly' ? 'Laporan Bulanan' :
                                          activeTab === 'pl' ? 'Laporan Laba Rugi' : 'Posisi Keuangan (Neraca)'}
                                     </h2>
                                     <p className="text-slate-500 text-sm mt-1 font-medium">Periode Tahun Buku 2025</p>
@@ -444,6 +628,7 @@
 
                             {/* DYNAMIC CONTENT */}
                             {activeTab === 'overview' && <Overview />}
+                            {activeTab === 'monthly' && <MonthlyReport />}
                             
                             {activeTab === 'pl' && (
                                 <div className="space-y-8 animate-enter">
