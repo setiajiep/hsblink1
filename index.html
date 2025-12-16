@@ -616,7 +616,8 @@
                                          activeTab === 'monthly' ? 'Laporan Bulanan' :
                                          activeTab === 'pl' ? 'Laporan Laba Rugi' : 'Posisi Keuangan (Neraca)'}
                                     </h2>
-                                    <p className="text-slate-500 text-sm mt-1 font-medium">Periode Tahun Buku 2025</p>
+                                    {/* UPDATE: Tahun Buku sekarang otomatis mengikuti tahun berjalan sistem */}
+                                    <p className="text-slate-500 text-sm mt-1 font-medium">Periode Tahun Buku {new Date().getFullYear()}</p>
                                 </div>
                                 <div className="hidden md:flex gap-4">
                                      <div className="bg-white px-4 py-2 rounded-lg border border-slate-200 text-xs font-bold text-slate-600 flex items-center gap-2 shadow-sm uppercase tracking-wide">
@@ -672,7 +673,8 @@
                             )}
 
                             <footer className="mt-12 text-center text-xs text-slate-400 pb-8 font-medium">
-                                &copy; 2025 HSBlinK Financial System.
+                                {/* UPDATE: Tahun copyright juga otomatis */}
+                                &copy; {new Date().getFullYear()} HSBlinK Financial System.
                             </footer>
                         </div>
                     </main>
